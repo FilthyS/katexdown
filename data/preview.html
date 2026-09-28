@@ -19,6 +19,10 @@
     <!-- Optional: KaTeX + markdown-it-texmath. Empty when not downloaded. -->
     <script>/*__KATEX_JS__*/</script>
     <script>/*__TEXMATH_JS__*/</script>
+    <!-- QWebChannel runtime: defines window.QWebChannel, which preview.js uses
+         to reach the host's clipboard bridge. Empty when unavailable; copying
+         then falls back to the browser APIs. -->
+    <script>/*__QWEBCHANNEL_JS__*/</script>
     <script>/*__PREVIEW_JS__*/</script>
   </head>
   <body>

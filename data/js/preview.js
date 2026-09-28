@@ -7,6 +7,11 @@
 //   __setColorScheme(dark)   set color-scheme + data attribute on <html>
 //   __setImageMode(mode)     image decode policy: 'eager' | 'auto' | 'saver'
 //                            (see the image-mode section below)
+//   __setCodeCopy(on)        show/hide the copy button on every code block
+//                            (see the code-copy section below)
+//   __kdxSelectionText()     the current selection as structured plain text,
+//                            for the host's Ctrl+C; "" when nothing is
+//                            selected (see the selection-copy section below)
 //   __scrollToFragment(frag) jump to the section a "#slug" fragment names
 //   __serializedHtml()       outerHTML with the image machinery normalized
 //                            away (real srcs, no lazy/placeholder state) —
@@ -271,6 +276,7 @@
     el.innerHTML = (fm ? fm.html : "") + md.render(fm ? fm.body : current);
     rebuildOutline();
     armImages();
+    decorateCodeBlocks();
   }
 
   window.__setMarkdown = function (text) {
@@ -599,6 +605,415 @@
     }
     root.removeAttribute("data-pv-imgmode");
     return root.outerHTML;
+  };
+
+  // ---------------------------------------------------------------------
+  // Code-block copy button (on by default, driven by the plugin settings): a
+  // small button in the corner of every <pre> copies the block's code to the
+  // clipboard. The button is a real DOM node, so it is part of what
+  // __serializedHtml() puts into an exported standalone .html — and the
+  // exported file embeds this script, whose delegated click listener below is
+  // what makes those serialized buttons work again. The flag is not
+  // serialized: an export made with the button off simply contains none, and
+  // this init intentionally does not decorate on load, so nothing re-adds
+  // them there. Clicking copies through kdxWriteClipboard above (host bridge
+  // first — the renderer's own clipboard writes need the document to hold
+  // focus and, for the async API, clipboard permission, which is not given in
+  // every session; the button must still copy, and Qt's clipboard always can).
+  // ---------------------------------------------------------------------
+  var codeCopyEnabled = true;
+
+  // Host clipboard bridge (the "kdxClipboard" QWebChannel object registered by
+  // PreviewWidget). An exported standalone .html has no qt.webChannelTransport
+  // (and no registered object), so the page then uses the browser APIs below.
+  var kdxClipboard = null;
+  var kdxClipboardRequested = false;
+
+  function ensureHostClipboard() {
+    if (kdxClipboardRequested) {
+      return kdxClipboard;
+    }
+    kdxClipboardRequested = true;
+    if (window.QWebChannel && window.qt && window.qt.webChannelTransport) {
+      try {
+        new QWebChannel(window.qt.webChannelTransport, function (channel) {
+          kdxClipboard = channel.objects.kdxClipboard || null;
+        });
+      } catch (e) {
+        kdxClipboard = null;
+      }
+    }
+    return kdxClipboard;
+  }
+
+  // The handshake is asynchronous, but it starts at page setup, long before a
+  // user can click a button; this just makes sure it has started.
+  ensureHostClipboard();
+
+  // One writer for every copy path in the page (the code-block button, and —
+  // through the host — Ctrl+C on a selection): the host bridge first, then the
+  // browser APIs, then execCommand. Only the live preview has the bridge; an
+  // exported standalone .html falls back to the browser APIs below.
+  // done(ok) is optional and only the button's feedback needs it.
+  function kdxWriteClipboard(text, done) {
+    var host = ensureHostClipboard();
+    if (host && typeof host.copy === "function") {
+      host.copy(text);
+      if (done) done(true);
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          if (done) done(true);
+        },
+        function () {
+          var ok = legacyCopyText(text);
+          if (done) done(ok);
+        }
+      );
+      return;
+    }
+    var ok = legacyCopyText(text);
+    if (done) done(ok);
+  }
+
+  function decorateCodeBlocks() {
+    var content = document.getElementById("content");
+    if (!content) {
+      return;
+    }
+    var pres = content.querySelectorAll("pre");
+    for (var i = 0; i < pres.length; i++) {
+      var pre = pres[i];
+      var existing = pre.querySelector(".kdx-copy-btn");
+      if (!codeCopyEnabled) {
+        if (existing) {
+          existing.parentNode.removeChild(existing);
+        }
+        continue;
+      }
+      if (existing) {
+        continue;
+      }
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "kdx-copy-btn";
+      btn.textContent = "Copy";
+      btn.setAttribute("aria-label", "Copy code to clipboard");
+      btn.title = "Copy code to clipboard";
+      pre.appendChild(btn);
+    }
+  }
+
+  function legacyCopyText(text) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.left = "-1000px";
+    document.body.appendChild(area);
+    area.select();
+    var ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    document.body.removeChild(area);
+    return ok;
+  }
+
+  function copyCodeBlock(btn) {
+    var pre = btn.closest("pre");
+    if (!pre) {
+      return;
+    }
+    var code = pre.querySelector("code");
+    var text = (code || pre).textContent;
+
+    function feedback(ok) {
+      btn.textContent = ok ? "Copied" : "Copy failed";
+      btn.disabled = true;
+      setTimeout(function () {
+        btn.textContent = "Copy";
+        btn.disabled = false;
+      }, 1200);
+    }
+
+    kdxWriteClipboard(text, feedback);
+  }
+
+  document.addEventListener(
+    "click",
+    function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".kdx-copy-btn") : null;
+      if (!btn || !codeCopyEnabled) {
+        return;
+      }
+      copyCodeBlock(btn);
+    },
+    false
+  );
+
+  window.__setCodeCopy = function (enabled) {
+    codeCopyEnabled = !!enabled;
+    decorateCodeBlocks();
+  };
+
+  // ---------------------------------------------------------------------
+  // Selection -> structured plain text. The host interrupts Ctrl+C /
+  // Ctrl+Insert on the preview (its focus-proxy event filter, see
+  // previewwidget.cpp), asks for __kdxSelectionText() and puts the result on
+  // Qt's clipboard — the same reason the code button uses the bridge: the
+  // renderer's own clipboard write is unreliable in embedded use. An exported
+  // standalone .html keeps the browser's native Ctrl+C, which is fine there.
+  //
+  // The page does the text shaping because a selection is DOM, not layout:
+  //   - block elements (paragraphs, headings, quotes, pre, lists, tables) are
+  //     separated by a blank line; list items by a single line break; <br>
+  //     is a line break
+  //   - <pre> keeps its text verbatim (indentation and newlines)
+  //   - <ul>/<ol> items get "- " / "N. " markers, indented two spaces per
+  //     nesting level; a task-list checkbox becomes "[x] " / "[ ] "
+  //   - a table becomes one line per row of "\t"-joined cells, cell-internal
+  //     whitespace flattened to spaces
+  //   - images are skipped; KaTeX contributes its LaTeX annotation once
+  //   - interactive chrome (code copy button, outline control) is skipped
+  // ---------------------------------------------------------------------
+  var SELECT_SKIP = [
+    ".kdx-copy-btn",
+    "#kdx-outline-btn",
+    "#kdx-outline-panel",
+    "script",
+    "style",
+    "svg",
+    "img",
+    "video",
+    "audio",
+    // KaTeX renders both a MathML and an HTML copy of the formula; the
+    // annotation rule below reads the LaTeX source once, these two would
+    // otherwise contribute the formula twice.
+    ".katex-html",
+    ".katex-mathml",
+  ].join(", ");
+  var SELECT_BLOCK = {
+    P: 1, DIV: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, BLOCKQUOTE: 1,
+    PRE: 1, TABLE: 1, UL: 1, OL: 1, DL: 1, DT: 1, DD: 1, FIGURE: 1,
+    FIGCAPTION: 1, DETAILS: 1, SUMMARY: 1, SECTION: 1, ARTICLE: 1, HEADER: 1,
+    FOOTER: 1, ASIDE: 1, MAIN: 1,
+  };
+
+  // Text of one text node, clipped to the selection when the node is a range
+  // boundary. Boundary containers can be elements (a Range built with
+  // selectNodeContents); those never match, so their whole text is taken.
+  function selectedTextOf(range, node) {
+    var start = node === range.startContainer ? range.startOffset : 0;
+    var end = node === range.endContainer ? range.endOffset : node.data.length;
+    return end > start ? node.data.slice(start, end) : "";
+  }
+
+  // Append s, first materializing any pending line breaks. The buffer is kept
+  // as a plain string; "pending" is the minimum number of newlines before the
+  // next content, so consecutive blocks cannot stack blank lines.
+  function selPut(state, s) {
+    if (state.pending) {
+      selFlush(state);
+    }
+    if (!s) {
+      return;
+    }
+    if (!state.pre) {
+      // Inline text renders as one logical line: HTML source newlines and
+      // runs of spaces collapse to a single space. A leading space is only
+      // dropped mid-line (never at a line start, where it is list indent).
+      s = s.replace(/\s+/g, " ");
+      if (s === " " && (state.pending || !state.buf || state.buf.charAt(state.buf.length - 1) === "\n")) {
+        // Whitespace between block-level siblings is source formatting, not
+        // rendered text: it must not indent the next block.
+        return;
+      }
+      if (state.buf && /[ \t]$/.test(state.buf)) {
+        s = s.replace(/^[ \t]+/, "");
+      }
+    }
+    state.buf += s;
+  }
+
+  // Append without any whitespace normalization or trimming: preformatted</
+  // text (<pre>) and the generated table grid carry their own whitespace.
+  function selPutRaw(state, s) {
+    if (state.pending) {
+      selFlush(state);
+    }
+    if (s) {
+      state.buf += s;
+    }
+  }
+
+  function selFlush(state) {
+    if (state.buf) {
+      state.buf = state.buf.replace(/[ \t]+$/, "");
+      var have = 0;
+      for (var i = state.buf.length - 1; i >= 0 && state.buf.charAt(i) === "\n"; i--) {
+        have++;
+      }
+      while (have < state.pending) {
+        state.buf += "\n";
+        have++;
+      }
+    }
+    state.pending = 0;
+  }
+
+  function selBreak(state, n) {
+    if (n > state.pending) {
+      state.pending = n;
+    }
+  }
+
+  // One table row -> one "\t"-joined line. A cell is walked with a throwaway
+  // state, then flattened: a newline inside a cell must not break the row.
+  function selCellText(cell, range) {
+    var state = { buf: "", pending: 0, pre: false };
+    var list = { depth: 0, ordered: false, n: 0 };
+    var children = cell.childNodes;
+    for (var i = 0; i < children.length; i++) {
+      selWalk(children[i], state, range, list);
+    }
+    return state.buf.replace(/[\t\n\r]+/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function selTable(table, state, range) {
+    var lines = [];
+    var rows = table.querySelectorAll("tr");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!range.intersectsNode(row)) {
+        continue;
+      }
+      var cells = [];
+      for (var j = 0; j < row.children.length; j++) {
+        var cell = row.children[j];
+        if (range.intersectsNode(cell)) {
+          cells.push(selCellText(cell, range));
+        }
+      }
+      lines.push(cells.join("\t"));
+    }
+    selBreak(state, 1);
+    selPutRaw(state, lines.join("\n"));
+    selBreak(state, 1);
+  }
+
+  function selWalk(node, state, range, list) {
+    if (!node || !range.intersectsNode(node)) {
+      return;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      selPut(state, selectedTextOf(range, node));
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+
+    var el = node;
+    if (el.classList && el.classList.contains("katex")) {
+      // The accessible MathML copy carries the LaTeX source in its
+      // annotation; that is the plain-text form of the formula. Inline math
+      // stays inline; the .katex-display wrapper gets its block break below.
+      var annotation = el.querySelector('annotation[encoding="application/x-tex"]');
+      selPut(state, annotation ? annotation.textContent : "");
+      return;
+    }
+    if (el.matches(SELECT_SKIP)) {
+      return;
+    }
+
+    var tag = el.tagName;
+    if (tag === "BR") {
+      selBreak(state, 1);
+      return;
+    }
+    if (tag === "INPUT") {
+      if (el.type === "checkbox") {
+        selPut(state, el.checked ? "[x] " : "[ ] ");
+      }
+      return;
+    }
+    if (tag === "PRE") {
+      var wasPre = state.pre;
+      state.pre = true;
+      for (var p = 0; p < el.childNodes.length; p++) {
+        selWalk(el.childNodes[p], state, range, list);
+      }
+      state.pre = wasPre;
+      selBreak(state, 2);
+      return;
+    }
+    if (tag === "TABLE") {
+      selTable(el, state, range);
+      selBreak(state, 2);
+      return;
+    }
+    if (tag === "UL" || tag === "OL") {
+      var nested = { depth: list.depth + 1, ordered: tag === "OL", n: 0 };
+      for (var l = 0; l < el.children.length; l++) {
+        selWalk(el.children[l], state, range, nested);
+      }
+      selBreak(state, 2);
+      return;
+    }
+    if (tag === "LI") {
+      selBreak(state, 1);
+      var indent = "";
+      for (var d = 1; d < list.depth; d++) {
+        indent += "  ";
+      }
+      var marker;
+      if (list.ordered) {
+        list.n += 1;
+        marker = list.n + ". ";
+      } else {
+        marker = "- ";
+      }
+      selPutRaw(state, indent + marker);
+      for (var li = 0; li < el.childNodes.length; li++) {
+        selWalk(el.childNodes[li], state, range, list);
+      }
+      selBreak(state, 1);
+      return;
+    }
+
+    for (var c = 0; c < el.childNodes.length; c++) {
+      selWalk(el.childNodes[c], state, range, list);
+    }
+    if (SELECT_BLOCK[tag] || (el.classList && el.classList.contains("katex-display"))) {
+      selBreak(state, 2);
+    }
+  }
+
+  // The current selection as plain text; "" when the selection is collapsed or
+  // the page has none. Called by the host for Ctrl+C / Ctrl+Insert.
+  window.__kdxSelectionText = function () {
+    var selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return "";
+    }
+    var range = selection.getRangeAt(0);
+    var root = range.commonAncestorContainer;
+    if (root && root.nodeType === Node.TEXT_NODE) {
+      root = root.parentNode;
+    }
+    if (!root) {
+      return "";
+    }
+    var state = { buf: "", pending: 0, pre: false };
+    selWalk(root, state, range, { depth: 0, ordered: false, n: 0 });
+    var out = state.buf.replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n");
+    return out.replace(/^[ \t\n]+/, "").replace(/[ \t\n]+$/, "");
   };
 
   // ---------------------------------------------------------------------

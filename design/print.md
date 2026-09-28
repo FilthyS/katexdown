@@ -21,6 +21,9 @@ Print rules live in `data/css/base.css` inside an `@media print` block:
   (the `!important` is required: `preview.js` may have set an inline
   `style.display` on the button, and inline styles would otherwise beat a
   plain author rule).
+- `.kdx-copy-btn`, the code-block copy button (see `clipboard.md`), is hidden
+  the same way. It is in-flow chrome inside each code block, so it would not
+  repeat on every sheet, but it is meaningless and visually noisy on paper.
 - `.markdown-body` bottom padding is reduced from the screen value (96px
   desktop / 64px mobile) to the regular 32px gutter. That padding exists
   only to keep content clear of the floating button on screen; in print it

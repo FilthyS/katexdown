@@ -75,6 +75,10 @@ public:
     }
     bool loadRemoteMedia() const { return m_loadRemoteMedia; }
     bool useGithubCss() const { return m_useGithubCss; }
+    // Whether every code block carries a copy-to-clipboard button. The button
+    // is part of the DOM (preview.js), so it travels into the exported
+    // standalone .html exactly as it is set here.
+    bool codeCopyButton() const { return m_codeCopyButton; }
     LoadingMode loadingMode() const
     {
         return m_loadingMode;
@@ -104,6 +108,7 @@ public:
     void setGhVariant(GhVariant variant);
     void setLoadRemoteMedia(bool enabled);
     void setUseGithubCss(bool enabled);
+    void setCodeCopyButton(bool enabled);
     void setLoadingMode(LoadingMode mode);
     void setImageMode(ImageMode mode);
     void setV8HeapCapMb(int mb);
@@ -125,6 +130,8 @@ private:
     // The bundled github-markdown.css is on by default; disabling it lets a
     // custom stylesheet fully own the layout instead of layering on GitHub's.
     bool m_useGithubCss = true;
+    // Copy button on code blocks; on by default.
+    bool m_codeCopyButton = true;
     LoadingMode m_loadingMode = LazyKeep;
     // Image decode policy; Auto by default (see enum above).
     ImageMode m_imageMode = Adaptive;

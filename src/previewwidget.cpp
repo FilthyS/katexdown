@@ -5,6 +5,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QDebug>
 #include <QDesktopServices>
@@ -12,6 +13,7 @@
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -22,6 +24,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QWebChannel>
 #include <QWebEngineHistory>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
@@ -442,6 +445,14 @@ public:
 };
 } // namespace
 
+void ClipboardBridge::copy(const QString &text)
+{
+    // Qt's clipboard, not the renderer's: works regardless of which widget
+    // holds focus and of Chromium's clipboard permissions (see the class
+    // comment in previewwidget.h).
+    QGuiApplication::clipboard()->setText(text);
+}
+
 PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::View *view, KTextEditor::Document *doc, QWidget *parent)
     : QWidget(parent)
     , m_mainWindow(mainWindow)
@@ -471,6 +482,12 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         openLink(url);
     };
     m_web->setPage(page);
+    // Page -> host clipboard bridge. The page object carries it across
+    // navigations, so a fresh load only needs qwebchannel.js inlined again
+    // (see buildHtml); the bridge itself survives.
+    auto *channel = new QWebChannel(page);
+    channel->registerObject(QStringLiteral("kdxClipboard"), new ClipboardBridge(channel));
+    page->setWebChannel(channel);
     // A Markdown reader does not use Chromium's interactive feature surface;
     // disabling it trims the renderer's GPU/compositor-side memory and raster
     // work. Images, scrolling, links and same-page anchors stay enabled.
@@ -592,6 +609,9 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         // renders once in the default mode and again in the configured one
         // (__setImageMode re-renders only when the mode actually changes).
         applyImageMode();
+        // Set the copy-button policy before the first render, so a disabled
+        // button is never decorated in the first place (no visible flash).
+        applyCodeCopy();
         render();
         applyOutlineSettings();
         if (!m_pendingExportPath.isEmpty()) {
@@ -614,6 +634,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyMediaPolicy);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyOutlineSettings);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyImageMode);
+    connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyCodeCopy);
 
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
     applyMediaPolicy();
@@ -781,6 +802,10 @@ QString PreviewWidget::buildHtml(int engines) const
     // preview.html treat an engine slot left empty as "feature off", exactly
     // like a page whose data-dir assets are missing.
     html.replace(QLatin1String("/*__MARKDOWN_IT__*/"), shieldScript(readAsset(base + QStringLiteral("js/markdown-it.min.js"))));
+    // qwebchannel.js is Qt's own resource; without it on the page there is no
+    // JS side of the clipboard bridge (the page then falls back to its
+    // browser clipboard APIs, as an exported file does).
+    html.replace(QLatin1String("/*__QWEBCHANNEL_JS__*/"), shieldScript(readAsset(QStringLiteral(":/qtwebchannel/qwebchannel.js"))));
     html.replace(QLatin1String("/*__PREVIEW_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/preview.js"))));
     // Optional engines, gated by the bits loadPage() chose for this text.
     // KaTeX is by far the heaviest (hundreds of KB of JS/CSS plus font data),
@@ -1008,6 +1033,17 @@ void PreviewWidget::applyImageMode()
         break;
     }
     runJs(QStringLiteral("window.__setImageMode('%1');").arg(QLatin1String(mode)));
+}
+
+void PreviewWidget::applyCodeCopy()
+{
+    if (!m_loaded) {
+        return;
+    }
+    // Decorate/undecorate the already-rendered blocks in place; the flag the
+    // page stores governs every later render too (see preview.js).
+    runJs(QStringLiteral("window.__setCodeCopy(%1);")
+              .arg(Settings::self()->codeCopyButton() ? QStringLiteral("true") : QStringLiteral("false")));
 }
 
 void PreviewWidget::render()
@@ -1493,7 +1529,17 @@ bool PreviewWidget::eventFilter(QObject *obj, QEvent *event)
         if (event->type() == QEvent::Resize) {
             noteActivity();
         }
-        return QWidget::eventFilter(obj, event);
+        // Keys normally go to the lazily created focus proxy, but a key can
+        // land on the view itself; handle both, so the shortcut claim below
+        // works whichever widget receives it.
+        switch (event->type()) {
+        case QEvent::ShortcutOverride:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+            break;
+        default:
+            return QWidget::eventFilter(obj, event);
+        }
     }
 
     // Anything the user does to the page — keys, clicks, scrolling, focus —
@@ -1517,6 +1563,24 @@ bool PreviewWidget::eventFilter(QObject *obj, QEvent *event)
     }
 
     switch (event->type()) {
+    case QEvent::ShortcutOverride:
+        // A real key event goes through Qt's shortcut map before the focus
+        // widget sees it. Kate's window-context actions (Copy, Select All,
+        // cursor movement) would take Ctrl+C / Ctrl+A / the arrow keys first:
+        // Ctrl+C in the preview would copy the *editor's* selection (wrong
+        // paragraph, wrong offsets, or nothing when there is none) and the
+        // page would never receive the key. Accepting the override keeps these
+        // keys for the preview; the KeyPress then arrives and forwardKeyEvent
+        // handles it. Tests must not rely only on sendEvent(): a synthetic
+        // event bypasses the shortcut map and cannot catch this.
+        if (previewHandlesKey(static_cast<QKeyEvent *>(event))) {
+            if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                qDebug() << "[katexdown] claimed key from the shortcut map" << static_cast<QKeyEvent *>(event)->key();
+            }
+            event->accept();
+            return true;
+        }
+        break;
     case QEvent::KeyPress:
         if (forwardKeyEvent(static_cast<QKeyEvent *>(event))) {
             return true;
@@ -1535,13 +1599,14 @@ bool PreviewWidget::eventFilter(QObject *obj, QEvent *event)
     return QWidget::eventFilter(obj, event);
 }
 
-bool PreviewWidget::forwardKeyEvent(QKeyEvent *event)
+bool PreviewWidget::previewHandlesKey(QKeyEvent *event) const
 {
     const Qt::KeyboardModifiers mods = event->modifiers();
     const int key = event->key();
 
-    // Keys the preview handles itself: scrolling/navigation and selection clipboard.
-    // These stay with the web view so reading the document keeps working.
+    // Reading keys the page scrolls with (and Select All) stay with the web
+    // view: the preview claims them from the shortcut map, then lets the web
+    // view handle the KeyPress.
     if (mods == Qt::NoModifier || mods == Qt::ShiftModifier) {
         switch (key) {
         case Qt::Key_Up:
@@ -1553,21 +1618,76 @@ bool PreviewWidget::forwardKeyEvent(QKeyEvent *event)
         case Qt::Key_Home:
         case Qt::Key_End:
         case Qt::Key_Space:
-            return false;
+            return true;
         default:
             break;
         }
     }
-    if (mods == Qt::ControlModifier && (key == Qt::Key_C || key == Qt::Key_A || key == Qt::Key_Insert)) {
-        return false;
+    if (mods == Qt::ControlModifier && (key == Qt::Key_C || key == Qt::Key_Insert || key == Qt::Key_A)) {
+        return true;
+    }
+    return false;
+}
+
+bool PreviewWidget::forwardKeyEvent(QKeyEvent *event)
+{
+    const Qt::KeyboardModifiers mods = event->modifiers();
+    const int key = event->key();
+
+    if (!previewHandlesKey(event)) {
+        // Not a key the preview uses: let a matching Kate shortcut run, since
+        // the web view would otherwise swallow the key.
+        QAction *action = kateActionFor(QKeySequence(event->keyCombination()));
+        if (!action) {
+            return false;
+        }
+        action->trigger();
+        return true;
     }
 
-    QAction *action = kateActionFor(QKeySequence(event->keyCombination()));
-    if (!action) {
+    // Copy is the host's: the renderer's own clipboard write is what silently
+    // does nothing in an embedded preview (see ClipboardBridge), so the page's
+    // selection is shaped and copied here instead. Only a loaded page can
+    // answer; otherwise the key falls through as before.
+    if (mods == Qt::ControlModifier && (key == Qt::Key_C || key == Qt::Key_Insert)) {
+        if (m_loaded) {
+            copySelection();
+            return true;
+        }
         return false;
     }
-    action->trigger();
-    return true;
+    // Scrolling/navigation and Select All are the web view's.
+    return false;
+}
+
+// Ctrl+C / Ctrl+Insert in the preview: copy the selection ourselves. The page
+// shapes the selected Range into structured plain text (__kdxSelectionText,
+// see preview.js) and this puts it on Qt's clipboard — the same transport the
+// code-block copy button uses, because the renderer's own clipboard write is
+// unreliable in embedded use (see ClipboardBridge).
+void PreviewWidget::copySelection()
+{
+    if (!m_loaded || !m_web) {
+        return;
+    }
+    // The callback can outlive the widget (a document switch may arrive while
+    // it is in flight), so hold it weakly. An empty result means "nothing
+    // selected": the clipboard is left alone, as in a browser.
+    QPointer<PreviewWidget> self(this);
+    m_web->page()->runJavaScript(
+        QStringLiteral("window.__kdxSelectionText ? window.__kdxSelectionText() : ''"),
+        [self](const QVariant &value) {
+            if (!self) {
+                return;
+            }
+            const QString text = value.toString();
+            if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                qDebug() << "[katexdown] copy selection chars:" << text.size();
+            }
+            if (!text.isEmpty()) {
+                QGuiApplication::clipboard()->setText(text);
+            }
+        });
 }
 
 bool PreviewWidget::forwardMouseEvent(QMouseEvent *event)

@@ -7,9 +7,14 @@
 #include "previewwidget.h"
 #include "settings.h"
 
+#include <QApplication>
+#include <QClipboard>
+#include <QDebug>
 #include <QDeadlineTimer>
 #include <QFile>
+#include <QKeyEvent>
 #include <QStringList>
+#include <QWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
@@ -100,6 +105,12 @@ private Q_SLOTS:
     void customCssApplies();
     void githubCssCanBeDisabled();
     void exportsStandaloneHtml();
+    void codeCopyButtonCanBeDisabled();
+    void codeCopyButtonCopiesViaHost();
+    void selectionCopyShapesPlainText();
+    void selectionCopyOfMathKeepsTheLatex();
+    void ctrlCCopiesSelectionToClipboard();
+    void previewClaimsItsKeysFromTheShortcutMap();
     void imageModesControlDecoding();
     void parkingPreservesTheImageBox();
     void relativeCssResolvesAgainstDataDir();
@@ -246,6 +257,275 @@ void RenderFeaturesTest::exportsStandaloneHtml()
     QVERIFY2(html.contains(QLatin1String("some exportable body")), qPrintable(QStringLiteral("export misses content")));
     QVERIFY2(html.contains(QLatin1String("id=\"ghmd\"")), qPrintable(QStringLiteral("export misses the github stylesheet")));
     QVERIFY2(html.contains(QLatin1String("markdown-body")), qPrintable(QStringLiteral("export misses the rendered article")));
+    delete doc;
+}
+
+// Every code block carries a copy button (on by default); the setting
+// removes/adds it live and, because the button is a DOM node that export
+// serializes, decides whether an exported .html carries it too.
+void RenderFeaturesTest::codeCopyButtonCanBeDisabled()
+{
+    QVERIFY(m_dir.isValid());
+    Settings::self()->setCodeCopyButton(true);
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# copy\n\n```js\nvar x = 1;\n```\n\ntext after.\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("text after")));
+
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelectorAll('#content pre .kdx-copy-btn').length"),
+                        QStringLiteral("1")));
+    // The button is a sibling of <code>, not part of it: copying the code
+    // takes exactly the fence text.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelector('#content pre code').textContent")),
+             QStringLiteral("var x = 1;\n"));
+
+    // Export serializes the button. Parse the serialized HTML to count real
+    // nodes — the embedded preview.js source mentions the class too.
+    const QString serializedButtons = QStringLiteral(
+        "(function () { var d = new DOMParser().parseFromString(window.__serializedHtml(), 'text/html'); "
+        "return String(d.querySelectorAll('.kdx-copy-btn').length); })()");
+    QCOMPARE(evalJs(preview.get(), serializedButtons), QStringLiteral("1"));
+
+    // Disabled: the live page drops the button and export follows.
+    Settings::self()->setCodeCopyButton(false);
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelectorAll('#content pre .kdx-copy-btn').length"),
+                        QStringLiteral("0")));
+    QCOMPARE(evalJs(preview.get(), serializedButtons), QStringLiteral("0"));
+    delete doc;
+
+    Settings::self()->setCodeCopyButton(true); // leave the default for later tests
+}
+
+// Clicking a copy button puts the block's text on the system clipboard through
+// the host's Qt-clipboard bridge (QWebChannel), not through the renderer's own
+// clipboard APIs — which need document focus / permission and silently do
+// nothing in some sessions. This is the behavior the button exists for.
+void RenderFeaturesTest::codeCopyButtonCopiesViaHost()
+{
+    QVERIFY(m_dir.isValid());
+    Settings::self()->setCodeCopyButton(true);
+    QApplication::clipboard()->clear();
+
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# copy\n\n```js\nvar copied = 42;\n```\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("copied")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelectorAll('#content .kdx-copy-btn').length"),
+                        QStringLiteral("1")));
+    // The QWebChannel transport must be on the page for the bridge to exist.
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(window.qt && window.qt.webChannelTransport) ? 'transport' : 'no-transport'"),
+                        QStringLiteral("transport")));
+
+    evalJs(preview.get(), QStringLiteral("document.querySelector('#content .kdx-copy-btn').click(); 'clicked'"));
+
+    const QString expected = QStringLiteral("var copied = 42;\n");
+    QDeadlineTimer deadline(10000);
+    while (!deadline.hasExpired() && QApplication::clipboard()->text() != expected) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QCOMPARE(QApplication::clipboard()->text(), expected);
+
+    delete doc;
+}
+
+// Ctrl+C on a selection hands the page's structured plain text to the host.
+// The page (__kdxSelectionText) is what shapes it: block boundaries become
+// blank lines, list items get markers and indentation, tables become
+// tab-separated rows, code keeps its text verbatim, and interactive chrome
+// (code copy button, outline control) never leaks into the clipboard.
+void RenderFeaturesTest::selectionCopyShapesPlainText()
+{
+    KTextEditor::Document *doc = openDocument(QStringLiteral(
+        "# Title 1\n"
+        "\n"
+        "Hello **world**, this is a paragraph.\n"
+        "\n"
+        "- alpha\n"
+        "- beta\n"
+        "  - nested\n"
+        "\n"
+        "1. one\n"
+        "2. two\n"
+        "\n"
+        "- [x] done\n"
+        "- [ ] todo\n"
+        "\n"
+        "```js\n"
+        "var x = 1;\n"
+        "```\n"
+        "\n"
+        "| a | b |\n"
+        "| - | - |\n"
+        "| 1 | 2 |\n"
+        "\n"
+        "after\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("after")));
+
+    // Select the whole body, like Ctrl+A does: this is also what proves the
+    // interactive chrome (which lives outside #content) is skipped.
+    const QString selectAll = QStringLiteral(
+        "var r = document.createRange(); r.selectNodeContents(document.body);"
+        "var s = getSelection(); s.removeAllRanges(); s.addRange(r); 'selected'");
+    QCOMPARE(evalJs(preview.get(), selectAll), QStringLiteral("selected"));
+    const QString all = evalJs(preview.get(), QStringLiteral("window.__kdxSelectionText()"));
+    QCOMPARE(all,
+             QStringLiteral("Title 1\n"
+                            "\n"
+                            "Hello world, this is a paragraph.\n"
+                            "\n"
+                            "- alpha\n"
+                            "- beta\n"
+                            "  - nested\n"
+                            "\n"
+                            "1. one\n"
+                            "2. two\n"
+                            "\n"
+                            "- [x] done\n"
+                            "- [ ] todo\n"
+                            "\n"
+                            "var x = 1;\n"
+                            "\n"
+                            "a\tb\n"
+                            "1\t2\n"
+                            "\n"
+                            "after"));
+    // The copy button and the outline control are chrome, not document text.
+    QVERIFY(!all.contains(QLatin1String("Copy")));
+
+    // A selection inside one block takes exactly the selected characters.
+    const QString partial = QStringLiteral(
+        "var t = document.querySelector('#content p strong').firstChild;"
+        "var r = document.createRange(); r.setStart(t, 0); r.setEnd(t, 5);"
+        "var s = getSelection(); s.removeAllRanges(); s.addRange(r); 'selected'");
+    QCOMPARE(evalJs(preview.get(), partial), QStringLiteral("selected"));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__kdxSelectionText()")), QStringLiteral("world"));
+
+    // Nothing selected: empty, so the host leaves the clipboard alone.
+    evalJs(preview.get(), QStringLiteral("getSelection().removeAllRanges(); 'cleared'"));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__kdxSelectionText()")), QString());
+
+    delete doc;
+}
+
+// A KaTeX formula renders twice (accessible MathML + visual HTML spans); a
+// copied selection must contribute the LaTeX source exactly once, from the
+// MathML annotation, not both DOM copies.
+void RenderFeaturesTest::selectionCopyOfMathKeepsTheLatex()
+{
+    const QString dataDir = katexdownpaths::dataDir();
+    if (!QFile::exists(dataDir + QStringLiteral("/katex.min.js")) || !QFile::exists(dataDir + QStringLiteral("/texmath.min.js"))) {
+        QSKIP("KaTeX assets not found in the data dir; run tools/fetch-assets.py");
+    }
+
+    KTextEditor::Document *doc = openDocument(QStringLiteral(
+        "# math\n\ninline $x^2 + y^2$ here.\n\n$$\n\\int_0^1 x\\,dx = \\frac{1}{2}\n$$\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("math")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelectorAll('#content .katex').length"),
+                        QStringLiteral("2")));
+
+    const QString select = QStringLiteral(
+        "var r = document.createRange(); r.selectNodeContents(document.getElementById('content'));"
+        "var s = getSelection(); s.removeAllRanges(); s.addRange(r); 'selected'");
+    QCOMPARE(evalJs(preview.get(), select), QStringLiteral("selected"));
+
+    const QString text = evalJs(preview.get(), QStringLiteral("window.__kdxSelectionText()"));
+    QCOMPARE(text.count(QLatin1String("x^2 + y^2")), 1);
+    QCOMPARE(text.count(QLatin1String("\\int_0^1 x\\,dx = \\frac{1}{2}")), 1);
+    QVERIFY2(text.contains(QLatin1String("inline x^2 + y^2 here.")), qPrintable(text));
+    delete doc;
+}
+
+// Qt runs the shortcut map before the focus widget sees a key, so a
+// window-context Kate action (Copy, Select All, cursor movement) would take
+// Ctrl+C / Ctrl+A / the arrow keys first and the preview would never get them:
+// Ctrl+C here would copy the *editor's* selection (wrong paragraph, wrong
+// offsets, or nothing at all). The preview must accept ShortcutOverride for
+// the keys it uses. A synthetic sendEvent() test alone cannot catch this,
+// because it bypasses the shortcut map — so this asserts the claim directly.
+void RenderFeaturesTest::previewClaimsItsKeysFromTheShortcutMap()
+{
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# Title 1\n\nHello world.\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("Hello world")));
+    preview->show();
+
+    auto *view = preview->findChild<QWebEngineView *>();
+    QVERIFY(view);
+    QWidget *proxy = nullptr;
+    QDeadlineTimer deadline(10000);
+    while (!deadline.hasExpired()) {
+        if ((proxy = view->focusProxy())) {
+            break;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QVERIFY2(proxy, "the web view never created its focus proxy");
+
+    auto overrideAccepted = [&](int key, Qt::KeyboardModifiers mods) {
+        QKeyEvent ovr(QEvent::ShortcutOverride, key, mods);
+        ovr.setAccepted(false);
+        QCoreApplication::sendEvent(proxy, &ovr);
+        return ovr.isAccepted();
+    };
+    // The keys the preview owns (copy, select all, reading keys) are claimed.
+    QVERIFY(overrideAccepted(Qt::Key_C, Qt::ControlModifier));
+    QVERIFY(overrideAccepted(Qt::Key_Insert, Qt::ControlModifier));
+    QVERIFY(overrideAccepted(Qt::Key_A, Qt::ControlModifier));
+    QVERIFY(overrideAccepted(Qt::Key_Down, Qt::NoModifier));
+    QVERIFY(overrideAccepted(Qt::Key_PageDown, Qt::NoModifier));
+    // A key the preview does not use stays unclaimed, so Kate's shortcut map
+    // still gets it.
+    QVERIFY(!overrideAccepted(Qt::Key_B, Qt::ControlModifier));
+
+    delete doc;
+}
+
+// The keyboard path: Ctrl+C in the preview is intercepted on the web view's
+// focus proxy and puts __kdxSelectionText() on Qt's clipboard (the renderer's
+// own clipboard write is unreliable, see codeCopyButtonCopiesViaHost).
+void RenderFeaturesTest::ctrlCCopiesSelectionToClipboard()
+{
+    QApplication::clipboard()->clear();
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# Title 1\n\nHello world.\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("Hello world")));
+    preview->show(); // the web view's render widget (and its focus proxy) needs a window
+
+    auto *view = preview->findChild<QWebEngineView *>();
+    QVERIFY(view);
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var r = document.createRange();"
+                                       "r.selectNodeContents(document.getElementById('content'));"
+                                       "var s = getSelection(); s.removeAllRanges(); s.addRange(r);"
+                                       "return 'selected'; })()"),
+                        QStringLiteral("selected")));
+
+    // installInputFilter attaches the key filter to the web view's focus proxy.
+    QWidget *proxy = nullptr;
+    QDeadlineTimer deadline(10000);
+    while (!deadline.hasExpired()) {
+        if ((proxy = view->focusProxy())) {
+            break;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QVERIFY2(proxy, "the web view never created its focus proxy");
+
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+    QCoreApplication::sendEvent(proxy, &press);
+
+    const QString expected = QStringLiteral("Title 1\n\nHello world.");
+    QDeadlineTimer wait(10000);
+    while (!wait.hasExpired() && QApplication::clipboard()->text() != expected) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QCOMPARE(QApplication::clipboard()->text(), expected);
+
     delete doc;
 }
 

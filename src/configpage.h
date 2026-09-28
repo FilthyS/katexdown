@@ -44,6 +44,7 @@ private:
     // Renderer JS heap cap in MB (0 = off); see Settings::v8HeapCapMb.
     QSpinBox *m_v8Cap = nullptr;
     QCheckBox *m_githubCss = nullptr;
+    QCheckBox *m_codeCopy = nullptr;
     QCheckBox *m_remoteMedia = nullptr;
     // Heading level 1..6 -> index 0..5.
     QCheckBox *m_tocLevel[6] = {};

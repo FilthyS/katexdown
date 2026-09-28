@@ -38,6 +38,7 @@ foreach(tgt rendermemorytest previewlifecycletest renderfeaturestest followmodet
     target_link_libraries(${tgt} PRIVATE
         Qt6::Test
         Qt6::Widgets
+        Qt6::WebChannel
         Qt6::WebEngineWidgets
         KF6::TextEditor
         KF6::I18n

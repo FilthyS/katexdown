@@ -137,6 +137,11 @@ ConfigPage::ConfigPage(QWidget *parent)
     cssHint->setEnabled(false);
     form->addRow(QString(), cssHint);
 
+    m_codeCopy = new QCheckBox(i18n("Show a copy button on code blocks"), this);
+    m_codeCopy->setToolTip(i18n("A button in the corner of every code block copies its contents to the clipboard."
+                                " It is part of the page, so it is included in (or left out of) exported HTML too."));
+    form->addRow(QString(), m_codeCopy);
+
     // Floating section outline: which heading levels it lists (H1-H5 default).
     auto *tocRowHost = new QWidget(this);
     auto *tocRow = new QHBoxLayout(tocRowHost);
@@ -242,6 +247,7 @@ ConfigPage::ConfigPage(QWidget *parent)
 
     connect(m_remoteMedia, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_githubCss, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
+    connect(m_codeCopy, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
         syncEnabled();
         Q_EMIT changed();
@@ -378,6 +384,7 @@ void ConfigPage::apply()
     s->setGhVariant(static_cast<Settings::GhVariant>(m_variant->currentData().toInt()));
     s->setLoadRemoteMedia(m_remoteMedia->isChecked());
     s->setUseGithubCss(m_githubCss->isChecked());
+    s->setCodeCopyButton(m_codeCopy->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
     s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
     s->setV8HeapCapMb(m_v8Cap->value());
@@ -402,6 +409,7 @@ void ConfigPage::reset()
     m_variant->setCurrentIndex(m_variant->findData(s->ghVariant()));
     m_remoteMedia->setChecked(s->loadRemoteMedia());
     m_githubCss->setChecked(s->useGithubCss());
+    m_codeCopy->setChecked(s->codeCopyButton());
     m_loading->setCurrentIndex(m_loading->findData(s->loadingMode()));
     m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
     m_v8Cap->setValue(s->v8HeapCapMb());
@@ -423,6 +431,7 @@ void ConfigPage::defaults()
     m_variant->setCurrentIndex(m_variant->findData(Settings::Auto));
     m_remoteMedia->setChecked(false);
     m_githubCss->setChecked(true);
+    m_codeCopy->setChecked(true);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
     m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
     m_v8Cap->setValue(Settings::DefaultV8HeapCapMb);

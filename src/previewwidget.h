@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QObject>
 #include <QPointer>
+#include <QString>
 #include <QUrl>
 #include <QWidget>
 
@@ -21,6 +23,31 @@ namespace KTextEditor
 {
 class MainWindow;
 }
+
+/**
+ * Page -> host clipboard bridge, exposed to the preview page as the QWebChannel
+ * object "kdxClipboard".
+ *
+ * The page's own clipboard APIs (`navigator.clipboard`, `execCommand("copy")`)
+ * require the document to hold focus and, for the async API, clipboard
+ * permission; in some sessions neither holds (the renderer's clipboard write
+ * never reaches the system clipboard, so even Ctrl+C in the preview does
+ * nothing), while Qt's own clipboard works. Code-block copying therefore goes
+ * through this bridge; the page keeps the browser APIs as a fallback for an
+ * exported standalone .html, which has no web-channel transport.
+ */
+class ClipboardBridge : public QObject
+{
+    Q_OBJECT
+public:
+    explicit ClipboardBridge(QObject *parent = nullptr)
+        : QObject(parent)
+    {
+    }
+
+public Q_SLOTS:
+    void copy(const QString &text);
+};
 
 /**
  * A single Markdown preview tab: a QWebEngineView fed by a self-contained HTML
@@ -102,6 +129,10 @@ private Q_SLOTS:
     // Push the configured image decode mode (Settings::ImageMode) into the
     // page, which lazy-loads / unloads images accordingly (see preview.js).
     void applyImageMode();
+    // Push the configured code-block copy button (Settings::codeCopyButton)
+    // into the page. The button lives in the DOM, so the setting also decides
+    // whether an export carries it.
+    void applyCodeCopy();
     // Periodic policy while the panel is closed (freeze on close, discard a
     // long-closed LazyKeep page) and while it is open (renderer-memory
     // maintenance: recycle the renderer once the estimated dead memory since
@@ -132,7 +163,19 @@ private:
     // Forward input the preview doesn't use back to Kate: QWebEngineView's render
     // widget swallows keys/mouse buttons before Kate's shortcut machinery sees them.
     void installInputFilter();
+    // Does the preview use this key itself (rather than leaving it to Kate's
+    // shortcut map)? Also the set the event filter claims on ShortcutOverride:
+    // Qt's shortcut map runs before the focus widget sees a key, so a
+    // window-context Kate action would otherwise take Ctrl+C / Select All /
+    // cursor keys first and the web view would never get them.
+    bool previewHandlesKey(QKeyEvent *event) const;
     bool forwardKeyEvent(QKeyEvent *event);
+    // Ctrl+C / Ctrl+Insert: ask the page for the current selection as structured
+    // plain text (__kdxSelectionText, see preview.js) and put it on Qt's
+    // clipboard. The renderer's own clipboard write is unreliable here, which is
+    // why the code-block copy button already goes through ClipboardBridge; the
+    // selection takes the same transport, with the shaping done in the page.
+    void copySelection();
     bool forwardMouseEvent(QMouseEvent *event);
     QAction *kateActionFor(const QKeySequence &seq) const;
     // ---- Renderer-memory maintenance (see the idleTick comment) ----

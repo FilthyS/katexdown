@@ -20,6 +20,7 @@ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS
     Gui
     Widgets
     Network
+    WebChannel
     WebEngineWidgets
 )
 
@@ -54,6 +55,7 @@ target_link_libraries(katexdown PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Network
+    Qt6::WebChannel
     Qt6::WebEngineWidgets
     KF6::TextEditor
     KF6::CoreAddons
