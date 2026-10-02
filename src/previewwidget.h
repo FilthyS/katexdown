@@ -122,6 +122,11 @@ public:
     void panelClosed(bool releaseWhenIdle);
     void panelOpened();
 
+    // Focus the actual WebEngine input widget, not this geometry/container
+    // widget. The target is resolved on every call because QWebEngineView can
+    // replace its focus proxy during a load.
+    bool focusContent(Qt::FocusReason reason = Qt::OtherFocusReason);
+
 Q_SIGNALS:
     // Emitted once the standalone HTML file has been written to path.
     void exportFinished(const QString &path);

@@ -796,14 +796,32 @@ void FollowModeTest::directionalFocusUsesPaneGeometryBothWays()
         editor->setFocus();
         QKeyEvent editorToPreview(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
         QCoreApplication::sendEvent(editor, &editorToPreview);
-        QTRY_VERIFY(preview->hasFocus() || preview->findChild<QWebEngineView *>()->hasFocus());
-
         auto *web = preview->findChild<QWebEngineView *>();
         QVERIFY(web);
-        QWidget *proxy = web->focusProxy();
-        QVERIFY(proxy);
-        proxy->setFocus();
-        QTest::qWait(100); // let the page/channel handshake settle
+        QWidget *proxy = nullptr;
+        QTRY_VERIFY((proxy = web->focusProxy()) != nullptr);
+        // The pane geometry widget must not merely report focus: the live
+        // WebEngine view (normally its render-widget proxy) must own it.
+        QTRY_VERIFY(QApplication::focusWidget() == proxy || QApplication::focusWidget() == web);
+        QVERIFY(QApplication::focusWidget() != preview);
+
+        // A real key after the handoff proves that focus reached the page
+        // rather than stopping at the outer PreviewWidget container.
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral(
+                            "window.scrollTo(0, 0);"
+                            "for (var i=0;i<120;i++) {"
+                            "var p=document.createElement('p'); p.textContent='focus handoff filler '+i;"
+                            "document.getElementById('content').appendChild(p);"
+                            "}"
+                            "String(window.scrollY)")),
+                 QStringLiteral("0"));
+        QTest::keyClick(proxy, Qt::Key_J);
+        QTRY_VERIFY(evalJs(preview, QStringLiteral("String(window.scrollY)")).toDouble() > 0);
+        const double afterJ = evalJs(preview, QStringLiteral("window.scrollY")).toDouble();
+        QTest::keyClick(proxy, Qt::Key_K);
+        QTRY_VERIFY(evalJs(preview, QStringLiteral("String(window.scrollY)")).toDouble() < afterJ);
+
         QCOMPARE(evalJs(preview,
                         QStringLiteral(
                             "window.__setReadingNavigation(true);"

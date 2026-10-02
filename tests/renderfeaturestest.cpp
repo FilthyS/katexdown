@@ -119,6 +119,7 @@ private Q_SLOTS:
     void parkingPreservesTheImageBox();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
+    void outlineButtonTracksTheme();
     void fragmentLinksJumpToSections();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
     void numberMathLoadsKatexEngine();
@@ -909,6 +910,42 @@ void RenderFeaturesTest::relativeCssResolvesAgainstDataDir()
     QCOMPARE(maxWidth, QStringLiteral("333px"));
 
     delete doc;
+}
+
+void RenderFeaturesTest::outlineButtonTracksTheme()
+{
+    Settings *settings = Settings::self();
+    const Settings::Mode oldMode = settings->mode();
+    const Settings::GhVariant oldVariant = settings->ghVariant();
+    settings->setMode(Settings::GitHub);
+    settings->setGhVariant(Settings::Light);
+
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# Theme\n\nbody\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("body")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral(
+                            "(function(){var b=document.getElementById('kdx-outline-btn');"
+                            "return b && getComputedStyle(b).display !== 'none' ? 'ready' : 'waiting';})()"),
+                        QStringLiteral("ready")));
+
+    const QString colors = QStringLiteral(
+        "(function(){var b=document.getElementById('kdx-outline-btn');"
+        "var p=b.querySelector('path');"
+        "return getComputedStyle(b).color+'|'+getComputedStyle(p).fill;})()");
+    QCOMPARE(evalJs(preview.get(), colors), QStringLiteral("rgb(31, 35, 40)|rgb(31, 35, 40)"));
+
+    settings->setGhVariant(Settings::Dark);
+    QVERIFY(waitForCond(preview.get(), colors, QStringLiteral("rgb(240, 246, 252)|rgb(240, 246, 252)")));
+
+    // Theme changes are live on an existing page, not only correct on its
+    // initial render.
+    settings->setGhVariant(Settings::Light);
+    QVERIFY(waitForCond(preview.get(), colors, QStringLiteral("rgb(31, 35, 40)|rgb(31, 35, 40)")));
+
+    delete doc;
+    settings->setGhVariant(oldVariant);
+    settings->setMode(oldMode);
 }
 
 // The floating section-outline control lists exactly the heading levels the

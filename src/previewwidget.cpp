@@ -477,6 +477,12 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     m_profile->setUrlRequestInterceptor(guard);
 
     m_web = new QWebEngineView(this);
+    // PreviewWidget remains the pane geometry used by PluginView, while focus
+    // must enter the WebEngine view (and, once created, its render-widget
+    // proxy). Keep both the Qt focus-proxy route and the explicit helper below
+    // so callers never need to know the WebEngine child hierarchy.
+    setFocusPolicy(Qt::StrongFocus);
+    setFocusProxy(m_web);
     auto *page = new PreviewPage(m_profile, m_web);
     page->onLinkActivated = [this](const QUrl &url) {
         openLink(url);
@@ -1173,6 +1179,26 @@ void PreviewWidget::panelOpened()
         m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
     }
     noteActivity();
+}
+
+bool PreviewWidget::focusContent(Qt::FocusReason reason)
+{
+    if (!m_web || !isVisible() || !m_web->isVisible() || !m_web->isEnabled()) {
+        return false;
+    }
+
+    // Do not cache the proxy: QtWebEngine creates/replaces it lazily around
+    // navigation. Calling setFocus on the view lets Qt choose the current
+    // proxy; the fallback handles versions where that first call stops at the
+    // QWebEngineView itself.
+    m_web->setFocus(reason);
+    if (!webHasFocus()) {
+        if (QWidget *proxy = m_web->focusProxy()) {
+            proxy->setFocus(reason);
+        }
+    }
+    installInputFilter();
+    return webHasFocus();
 }
 
 // One policy tick, every second. While the panel is closed it walks the

@@ -289,7 +289,11 @@ bool PluginView::handleEditorDirectionalEvent(QObject *watched, QEvent *event)
         event->accept();
         return true;
     }
-    destination->setFocus(Qt::OtherFocusReason);
+    if (destination == m_preview) {
+        m_preview->focusContent(Qt::OtherFocusReason);
+    } else {
+        destination->setFocus(Qt::OtherFocusReason);
+    }
     return true;
 }
 

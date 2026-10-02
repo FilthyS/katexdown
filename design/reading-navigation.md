@@ -49,6 +49,9 @@ No left/right layout is assumed.
   to the page merely because the nested target is already at an edge.
 - Focus movement uses actual widget geometry and does nothing when no pane lies
   in the requested direction.
+- The preview pane's geometry container is not treated as the focused content:
+  editor-to-preview movement resolves the current WebEngine view/focus proxy,
+  and the handoff is useful only when subsequent page keys reach that child.
 - DOM focus ownership is decided for each key event; no asynchronous Qt cache
   can survive a focus transition, reload, or discarded page.
 - A render clears the remembered hover node, and horizontal navigation rejects
@@ -63,6 +66,10 @@ No left/right layout is assumed.
   input filter attached to the current proxy. Ctrl directional ownership must
   remain in the page's DOM keydown path; polling activeElement from a Qt event
   filter races the browser's default focus processing and can steal controls.
+- `PreviewWidget` is deliberately retained as the pane geometry object. Calling
+  `setFocus()` on that outer widget can leave focus outside the WebEngine
+  render widget; use its focus-content helper, which resolves the live proxy
+  on every handoff.
 - `Ctrl+h/j/k/l` intentionally conflicts with Kate actions using those
   sequences while the option is enabled. The configuration page calls this
   out; turning the option off restores those shortcuts.
